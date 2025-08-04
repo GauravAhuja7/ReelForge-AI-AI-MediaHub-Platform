@@ -1,87 +1,3 @@
-// import { NextResponse } from "next/server";
-// import { getServerSession } from "next-auth";
-// import { authOptions } from "../../../../../lib/auth";
-// import { connectToDatabase } from "../../../../../lib/db";
-// import Video from "../../../../../models/Video";
-// import ApiUsage from "../../../../../models/ApiUsage";
-// import { callAIModel } from "@/lib/aiModels";
-// import { generateTavusVideo } from "@/lib/tavusModel";
-
-// export async function POST(request) {
-//   const session = await getServerSession(authOptions);
-
-//   if (!session || !session.user) {
-//     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-//   }
-
-//   const { prompt, model, duration, resolution } = await request.json();
-
-//   try {
-//     await connectToDatabase();
-
-//     if (!session.user.subscription) {
-//       session.user.subscription = { plan: "free", expiresAt: null };
-//     }
-
-//     console.log("📌 Received Video Generation Request:", { model, prompt, duration, resolution });
-
-//     // Check API usage limit
-//     const today = new Date().toISOString().split("T")[0];
-//     let usage = await ApiUsage.findOne({ userId: session.user.id, date: today });
-
-//     if (!usage) {
-//       usage = await ApiUsage.create({ userId: session.user.id });
-//     }
-
-//     const maxLimit = { free: 1, pro: 5, "pro-plus": Infinity };
-//     const userPlan = session.user.subscription.plan || "free";
-
-//     // if (usage.textToVideoCount >= maxLimit[userPlan]) {
-//     //   return NextResponse.json({ error: "Daily video limit reached. Upgrade your plan." }, { status: 403 });
-//     // }
-
-//     let videoUrl;
-
-//     // Use Tavus AI if the model is "tavus"
-//     if (model === "Tavus") {
-//       console.log("🔄 Using Tavus AI for video generation...");
-//       const tavusResponse = await generateTavusVideo(prompt);
-//       if (tavusResponse.error) {
-//         return NextResponse.json({ error: "Tavus video generation failed." }, { status: 500 });
-//       }
-//       videoUrl = tavusResponse.download_url;
-//     } else {
-//       console.log("🔄 Using custom AI model...");
-//       videoUrl = await callAIModel(model, prompt, "textToVideo");
-//     }
-
-//     if (!videoUrl) {
-//       return NextResponse.json({ error: "Video URL not found" }, { status: 500 });
-//     }
-
-//     // Store the generated video in the database
-//     const videoRecord = await Video.create({
-//       userId: session.user.id,
-//       modelUsed: model,
-//       prompt,
-//       videoUrl,
-//       duration,
-//       resolution,
-//     });
-
-//     // Update API usage count
-//     usage.textToVideoCount += 1;
-//     await usage.save();
-
-//     console.log("✅ Video Successfully Generated:", videoUrl);
-//     return NextResponse.json({ videoUrl, videoId: videoRecord._id }, { status: 200 });
-//   } catch (error) {
-//     console.error("❌ Error generating video:", error.message);
-//     return NextResponse.json({ error: error.message }, { status: 500 });
-//   }
-// }
-
-
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../../../../../lib/auth";
@@ -90,56 +6,129 @@ import Video from "../../../../../models/Video";
 import ApiUsage from "../../../../../models/ApiUsage";
 import { generateTavusVideo } from "@/lib/tavusModel";
 
+/**
+ * Video Generation API Route
+ * POST /api/user/generate/video
+ * 
+ * Handles text-to-video generation requests using Tavus AI
+ * Creates video records and tracks API usage for authenticated users
+ * Returns video ID and status for async processing
+ * 
+ * @param {Request} request - HTTP request containing video generation parameters
+ * @returns {NextResponse} JSON response with video generation status
+ */
 export async function POST(request) {
+  // Verify user authentication
   const session = await getServerSession(authOptions);
 
   if (!session || !session.user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Authentication required. Please log in to generate videos." }, 
+      { status: 401 }
+    );
   }
 
-  const { prompt, model, duration, resolution } = await request.json();
-
   try {
+    // Extract video generation parameters from request
+    const { prompt, model, duration, resolution } = await request.json();
+
+    // Validate required parameters
+    if (!prompt || !model) {
+      return NextResponse.json(
+        { error: "Missing required parameters. Prompt and model are required." },
+        { status: 400 }
+      );
+    }
+
+    // Connect to database
     await connectToDatabase();
 
-    console.log("📌 Received Video Generation Request:", { model, prompt });
+    console.log("📌 Video Generation Request:", { 
+      userId: session.user.id,
+      model, 
+      promptLength: prompt.length 
+    });
 
-    // Check API usage limit
+    // Track daily API usage for this user
     const today = new Date().toISOString().split("T")[0];
-    let usage = await ApiUsage.findOne({ userId: session.user.id, date: today });
+    let usage = await ApiUsage.findOne({ 
+      userId: session.user.id, 
+      date: today 
+    });
 
+    // Create usage record if none exists for today
     if (!usage) {
-      usage = await ApiUsage.create({ userId: session.user.id });
+      usage = await ApiUsage.create({ 
+        userId: session.user.id,
+        date: today 
+      });
     }
 
-    // Call Tavus AI and get video_id (async)
+    // Generate video using Tavus AI service
+    console.log("🔄 Initiating video generation with Tavus AI...");
     const tavusResponse = await generateTavusVideo(prompt);
+    
+    // Handle AI service errors
     if (tavusResponse.error) {
-      return NextResponse.json({ error: "Tavus video generation failed." }, { status: 500 });
+      console.error("❌ Tavus AI Error:", tavusResponse.error);
+      return NextResponse.json(
+        { error: "Video generation service temporarily unavailable. Please try again later." }, 
+        { status: 500 }
+      );
     }
 
+    // Extract video information from Tavus response
     const { video_id, status, hosted_url, created_at } = tavusResponse;
 
-    // Save the video record with status = "queued"
+    // Save video record to database
     const videoRecord = await Video.create({
       userId: session.user.id,
       modelUsed: model,
       prompt,
-      duration,
-      resolution,
+      duration: duration || 10, // Default duration if not provided
+      resolution: resolution || "720p", // Default resolution if not provided
       videoId: video_id,
       videoUrl: hosted_url,
-      status, // "queued"
+      status, // Usually "queued" initially
       createdAt: created_at,
     });
 
+    // Update user's daily usage count
     usage.textToVideoCount += 1;
     await usage.save();
 
-    console.log("✅ Tavus Video Request Stored:", video_id);
-    return NextResponse.json({ videoId: video_id, status }, { status: 202 }); // 202 for async
+    console.log("✅ Video generation request processed successfully:", {
+      videoId: video_id,
+      status,
+      databaseId: videoRecord._id
+    });
+
+    // Return success response with video tracking information
+    return NextResponse.json(
+      { 
+        videoId: video_id, 
+        status,
+        message: "Video generation started successfully. Check back for updates."
+      }, 
+      { status: 202 } // 202 Accepted - request accepted for processing
+    );
+
   } catch (error) {
-    console.error("❌ Error generating video:", error.message);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    // Log detailed error for debugging
+    console.error("❌ Video generation error:", {
+      message: error.message,
+      stack: error.stack,
+      userId: session?.user?.id
+    });
+
+    // Return user-friendly error message
+    return NextResponse.json(
+      { 
+        error: "An unexpected error occurred during video generation. Please try again.",
+        // Include error details in development mode only
+        ...(process.env.NODE_ENV === 'development' && { details: error.message })
+      }, 
+      { status: 500 }
+    );
   }
 }
